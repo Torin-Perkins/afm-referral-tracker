@@ -24,6 +24,19 @@
 
       <div id="msg" class="msg" role="status" hidden></div>
 
+      <section class="shot" aria-labelledby="shot-title">
+        <h2 id="shot-title">Have a screenshot?</h2>
+        <p>Upload a screenshot of the text conversation and we'll fill in the AFM's name and number for you.</p>
+        <label id="drop" class="drop" for="shot">
+          <input id="shot" type="file" accept="image/*">
+          <img id="shot-preview" alt="" hidden>
+          <span id="shot-label">Choose a screenshot, drop it here, or paste it</span>
+        </label>
+        <div id="shot-msg" class="shot-msg" role="status" hidden></div>
+      </section>
+
+      <div class="divider"><span>or type it in</span></div>
+
       <form id="form" novalidate>
         <div class="field">
           <label for="name">AFM's name</label>
@@ -71,6 +84,93 @@
       msg.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }
 
+    /* ---------- Screenshot reading ---------- */
+    const shotInput = document.getElementById('shot');
+    const drop = document.getElementById('drop');
+    const preview = document.getElementById('shot-preview');
+    const shotLabel = document.getElementById('shot-label');
+    const shotMsg = document.getElementById('shot-msg');
+    let reading = false;
+
+    function shotStatus(type, text) {
+      shotMsg.className = 'shot-msg ' + type;
+      shotMsg.textContent = text;
+      shotMsg.hidden = !text;
+    }
+
+    // Shrink big phone screenshots before upload; keeps text legible.
+    function toJpegBase64(file, maxEdge = 2000) {
+      return new Promise((resolve, reject) => {
+        const url = URL.createObjectURL(file);
+        const img = new Image();
+        img.onload = () => {
+          const scale = Math.min(1, maxEdge / Math.max(img.width, img.height));
+          const canvas = document.createElement('canvas');
+          canvas.width = Math.round(img.width * scale);
+          canvas.height = Math.round(img.height * scale);
+          const ctx = canvas.getContext('2d');
+          ctx.fillStyle = '#fff';
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          URL.revokeObjectURL(url);
+          resolve(canvas.toDataURL('image/jpeg', 0.9));
+        };
+        img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('That file isn\'t an image we can read.')); };
+        img.src = url;
+      });
+    }
+
+    function fill(id, value) {
+      if (!value) return;
+      const el = document.getElementById(id);
+      el.value = value;
+      el.classList.remove('filled');
+      void el.offsetWidth; // restart highlight animation
+      el.classList.add('filled');
+    }
+
+    async function readScreenshot(file) {
+      if (!file || reading) return;
+      if (!file.type.startsWith('image/')) return shotStatus('err', 'Please choose an image file.');
+      reading = true;
+      drop.classList.add('busy');
+      shotStatus('info', 'Reading screenshot…');
+      try {
+        const dataUrl = await toJpegBase64(file);
+        preview.src = dataUrl;
+        preview.hidden = false;
+        shotLabel.textContent = 'Choose a different screenshot';
+        const res = await callApi({ action: 'extract', mediaType: 'image/jpeg', image: dataUrl.split(',')[1] });
+        if (!res.ok) throw new Error(res.error || 'Couldn\'t read the screenshot.');
+        if (!res.name && !res.phone) {
+          shotStatus('err', 'Couldn\'t find a name or phone number in that screenshot. ' + (res.explanation || ''));
+          return;
+        }
+        fill('name', res.name);
+        fill('phone', res.phone);
+        fill('email', res.email);
+        shotStatus('ok', 'Filled in below. Please double-check before submitting.' +
+          (res.explanation ? ' (' + res.explanation + ')' : ''));
+        document.getElementById('name').focus({ preventScroll: true });
+      } catch (err) {
+        shotStatus('err', err.message);
+      } finally {
+        reading = false;
+        drop.classList.remove('busy');
+        shotInput.value = '';
+      }
+    }
+
+    shotInput.addEventListener('change', () => readScreenshot(shotInput.files[0]));
+    ['dragenter', 'dragover'].forEach(ev => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add('over'); }));
+    ['dragleave', 'drop'].forEach(ev => drop.addEventListener(ev, () => drop.classList.remove('over')));
+    drop.addEventListener('drop', (e) => { e.preventDefault(); readScreenshot(e.dataTransfer.files[0]); });
+    document.addEventListener('paste', (e) => {
+      const item = [...(e.clipboardData?.items || [])].find(i => i.type.startsWith('image/'));
+      if (item) { e.preventDefault(); readScreenshot(item.getAsFile()); }
+    });
+
+    /* ---------- Referral submit ---------- */
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
       const data = Object.fromEntries(new FormData(form));
@@ -89,6 +189,9 @@
         const res = await callApi({ action: 'submit', ...data });
         if (!res.ok) throw new Error(res.error || 'Submission failed.');
         form.reset();
+        preview.hidden = true;
+        shotLabel.textContent = 'Choose a screenshot, drop it here, or paste it';
+        shotStatus('', '');
         show('ok', 'Thanks! Your referral for ' + data.name + ' was sent.');
       } catch (err) {
         show('err', err.message);

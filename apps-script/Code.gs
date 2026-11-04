@@ -11,6 +11,8 @@
  *                     Comma-separate for several people. If unset, the email
  *                     goes to the account that owns the script (you), which
  *                     is handy while testing.
+ *   ANTHROPIC_API_KEY (optional) Claude API key for reading screenshots.
+ *                     Without it the screenshot upload is turned off.
  */
 
 const SHEET_NAME = 'Referrals';
@@ -18,6 +20,10 @@ const HEADERS = ['Submitted', 'AFM Name', 'Phone', 'Email', 'Referred By', 'Note
 
 const MAX_FAILED_LOGINS = 10;        // per window, across all visitors
 const FAILED_LOGIN_WINDOW_SEC = 600; // 10 minutes
+
+const CLAUDE_MODEL = 'claude-opus-5-5';
+const MAX_EXTRACTS_PER_HOUR = 40;            // across all visitors; caps API spend
+const MAX_IMAGE_BASE64_CHARS = 7 * 1024 * 1024; // ~5 MB image
 
 function doPost(e) {
   let body;
@@ -30,6 +36,7 @@ function doPost(e) {
   try {
     if (body.action === 'submit') return json_(handleSubmit_(body));
     if (body.action === 'list') return json_(handleList_(body));
+    if (body.action === 'extract') return json_(handleExtract_(body));
     return json_({ ok: false, error: 'Unknown action.' });
   } catch (err) {
     console.error(err);
@@ -146,6 +153,109 @@ function handleList_(body) {
     .reverse(); // newest first
 
   return { ok: true, rows };
+}
+
+/* --------------------------------------------------- screenshot extract */
+
+const EXTRACT_PROMPT = [
+  'This is a screenshot of a text message conversation in which someone is referring',
+  'a person for an AFM (Assistant Fitness Manager) role, or sharing that person\'s contact info.',
+  '',
+  'Find the person being referred (the AFM candidate) and return their name and phone number,',
+  'plus their email if one appears. Look at the contact name or number in the conversation header,',
+  'shared contact cards, and the message text itself. Format US phone numbers as (555) 555-5555.',
+  '',
+  'If a field is not visible or you are unsure, return an empty string for it rather than guessing.',
+  'Use "explanation" for one short sentence on where you found the info, or what was unclear',
+  '(for example, if several people could be the candidate).',
+].join('\n');
+
+const EXTRACT_SCHEMA = {
+  type: 'object',
+  properties: {
+    name: { type: 'string', description: 'Full name of the referred AFM, or empty string' },
+    phone: { type: 'string', description: 'Phone number of the referred AFM, or empty string' },
+    email: { type: 'string', description: 'Email of the referred AFM, or empty string' },
+    explanation: { type: 'string', description: 'One short sentence on where the info came from' },
+  },
+  required: ['name', 'phone', 'email', 'explanation'],
+  additionalProperties: false,
+};
+
+function handleExtract_(body) {
+  const apiKey = PropertiesService.getScriptProperties().getProperty('ANTHROPIC_API_KEY');
+  if (!apiKey) return { ok: false, error: 'Screenshot reading isn\'t set up yet.' };
+
+  const mediaType = String(body.mediaType || '');
+  const data = String(body.image || '');
+  if (!/^image\/(jpeg|png|gif|webp)$/.test(mediaType) || !data) {
+    return { ok: false, error: 'Please upload a JPG or PNG screenshot.' };
+  }
+  if (data.length > MAX_IMAGE_BASE64_CHARS) {
+    return { ok: false, error: 'That image is too large. Try a smaller screenshot.' };
+  }
+
+  // Global hourly cap so a public page can't run up the API bill.
+  const cache = CacheService.getScriptCache();
+  const hourKey = 'extracts-' + Math.floor(Date.now() / 3600000);
+  const used = Number(cache.get(hourKey) || 0);
+  if (used >= MAX_EXTRACTS_PER_HOUR) {
+    return { ok: false, error: 'Screenshot reading is busy right now. Please type the info in instead.' };
+  }
+  cache.put(hourKey, String(used + 1), 3600);
+
+  const res = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', {
+    method: 'post',
+    contentType: 'application/json',
+    muteHttpExceptions: true,
+    headers: {
+      'x-api-key': apiKey,
+      'anthropic-version': '2026-10-21',
+      // If a safety check declines the request, let the API retry on a suitable model.
+      'anthropic-beta': 'server-side-fallback-2026-07-01',
+    },
+    payload: JSON.stringify({
+      model: CLAUDE_MODEL,
+      max_tokens: 16000,
+      fallbacks: 'default',
+      output_config: {
+        effort: 'low',
+        format: { type: 'json_schema', schema: EXTRACT_SCHEMA },
+      },
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'image', source: { type: 'base64', media_type: mediaType, data: data } },
+          { type: 'text', text: EXTRACT_PROMPT },
+        ],
+      }],
+    }),
+  });
+
+  const status = res.getResponseCode();
+  if (status !== 200) {
+    console.error('Claude API error ' + status + ': ' + res.getContentText().slice(0, 1000));
+    return { ok: false, error: 'Couldn\'t read the screenshot right now. Please type the info in instead.' };
+  }
+
+  const msg = JSON.parse(res.getContentText());
+  if (msg.stop_reason === 'refusal') {
+    return { ok: false, error: 'Couldn\'t read that screenshot. Please type the info in instead.' };
+  }
+  const textBlock = (msg.content || []).find(b => b.type === 'text');
+  if (!textBlock) {
+    console.error('No text block in Claude response: ' + JSON.stringify(msg).slice(0, 1000));
+    return { ok: false, error: 'Couldn\'t read the screenshot. Please type the info in instead.' };
+  }
+
+  const out = JSON.parse(textBlock.text);
+  return {
+    ok: true,
+    name: clean_(out.name, 100),
+    phone: clean_(out.phone, 30),
+    email: clean_(out.email, 254),
+    explanation: clean_(out.explanation, 300),
+  };
 }
 
 /* --------------------------------------------------------------- helpers */
