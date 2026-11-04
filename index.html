@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Refer an AFM</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="site">
+    <div class="inner">
+      <a class="brand" href="./">AFM Referrals</a>
+      <nav>
+        <a href="./" aria-current="page">Refer</a>
+        <a href="tracker.html">Tracker</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <div class="card">
+      <h1>Refer an AFM</h1>
+      <p class="lead">Know someone who'd make a great AFM? Send us their info and we'll reach out.</p>
+
+      <div id="msg" class="msg" role="status" hidden></div>
+
+      <form id="form" novalidate>
+        <div class="field">
+          <label for="name">AFM's name</label>
+          <input id="name" name="name" autocomplete="off" maxlength="100" required>
+        </div>
+        <div class="field">
+          <label for="phone">AFM's phone number</label>
+          <input id="phone" name="phone" type="tel" inputmode="tel" autocomplete="off" maxlength="30" placeholder="(555) 555-5555" required>
+        </div>
+        <div class="field">
+          <label for="email">AFM's email <span class="optional">(optional)</span></label>
+          <input id="email" name="email" type="email" autocomplete="off" maxlength="254">
+        </div>
+        <div class="field">
+          <label for="referredBy">Your name <span class="optional">(optional)</span></label>
+          <input id="referredBy" name="referredBy" autocomplete="name" maxlength="100">
+        </div>
+        <div class="field">
+          <label for="notes">Notes <span class="optional">(optional)</span></label>
+          <textarea id="notes" name="notes" maxlength="1000"></textarea>
+        </div>
+
+        <!-- Honeypot for bots; hidden from people -->
+        <div class="hp" aria-hidden="true">
+          <label for="website">Website</label>
+          <input id="website" name="website" tabindex="-1" autocomplete="off">
+        </div>
+
+        <button id="submit" class="full" type="submit">Submit referral</button>
+      </form>
+    </div>
+  </main>
+
+  <script src="config.js"></script>
+  <script src="api.js"></script>
+  <script>
+    const form = document.getElementById('form');
+    const msg = document.getElementById('msg');
+    const btn = document.getElementById('submit');
+
+    function show(type, text) {
+      msg.className = 'msg ' + type;
+      msg.textContent = text;
+      msg.hidden = false;
+      msg.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const data = Object.fromEntries(new FormData(form));
+      for (const k in data) data[k] = String(data[k]).trim();
+
+      if (!data.name) return show('err', 'Please enter the AFM\'s name.');
+      const digits = data.phone.replace(/\D/g, '');
+      if (digits.length < 7 || digits.length > 15) return show('err', 'Please enter a valid phone number.');
+      if (data.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.email)) {
+        return show('err', 'That email address doesn\'t look right.');
+      }
+
+      btn.disabled = true;
+      btn.textContent = 'Submitting…';
+      try {
+        const res = await callApi({ action: 'submit', ...data });
+        if (!res.ok) throw new Error(res.error || 'Submission failed.');
+        form.reset();
+        show('ok', 'Thanks! Your referral for ' + data.name + ' was sent.');
+      } catch (err) {
+        show('err', err.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Submit referral';
+      }
+    });
+  </script>
+</body>
+</html>

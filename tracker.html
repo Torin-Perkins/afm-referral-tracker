@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>Referral Tracker</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="site">
+    <div class="inner">
+      <a class="brand" href="./">AFM Referrals</a>
+      <nav>
+        <a href="./">Refer</a>
+        <a href="tracker.html" aria-current="page">Tracker</a>
+      </nav>
+    </div>
+  </header>
+
+  <!-- Login -->
+  <main id="login-view">
+    <div class="card">
+      <h1>Referral Tracker</h1>
+      <p class="lead">Enter the password to see all referrals.</p>
+      <div id="login-msg" class="msg err" role="alert" hidden></div>
+      <form id="login-form">
+        <div class="field">
+          <label for="password">Password</label>
+          <input id="password" type="password" autocomplete="current-password" required>
+        </div>
+        <button id="login-btn" class="full" type="submit">View referrals</button>
+      </form>
+    </div>
+  </main>
+
+  <!-- Data -->
+  <main id="data-view" class="wide" hidden>
+    <h1>Referral Tracker</h1>
+    <div class="toolbar">
+      <input id="search" type="search" placeholder="Search name, phone, email…" aria-label="Search referrals">
+      <button id="refresh" class="secondary" type="button">Refresh</button>
+      <button id="logout" class="secondary" type="button">Sign out</button>
+    </div>
+    <div id="data-msg" class="msg err" role="alert" hidden></div>
+    <div id="count" class="count"></div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Submitted</th>
+            <th>AFM Name</th>
+            <th>Phone</th>
+            <th>Email</th>
+            <th>Referred By</th>
+            <th>Notes</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+      <div id="empty" class="empty" hidden>No referrals yet.</div>
+    </div>
+  </main>
+
+  <script src="config.js"></script>
+  <script src="api.js"></script>
+  <script>
+    const KEY = 'afmTrackerPw';
+    const $ = (id) => document.getElementById(id);
+    let allRows = [];
+
+    // Password is kept only for this browser tab and is cleared when it closes.
+    function getPw() { try { return sessionStorage.getItem(KEY); } catch { return null; } }
+    function setPw(v) { try { v ? sessionStorage.setItem(KEY, v) : sessionStorage.removeItem(KEY); } catch {} }
+
+    function showLogin(error) {
+      $('data-view').hidden = true;
+      $('login-view').hidden = false;
+      $('login-msg').hidden = !error;
+      $('login-msg').textContent = error || '';
+      $('password').focus();
+    }
+
+    function fmtDate(iso) {
+      const d = new Date(iso);
+      if (isNaN(d)) return iso;
+      return d.toLocaleString(undefined, { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' });
+    }
+
+    function cell(text, cls) {
+      const td = document.createElement('td');
+      if (cls) td.className = cls;
+      td.textContent = text || '';
+      return td;
+    }
+
+    function linkCell(text, href) {
+      const td = document.createElement('td');
+      td.className = 'nowrap';
+      if (text) {
+        const a = document.createElement('a');
+        a.href = href;
+        a.textContent = text;
+        td.appendChild(a);
+      }
+      return td;
+    }
+
+    function render() {
+      const q = $('search').value.trim().toLowerCase();
+      const rows = q
+        ? allRows.filter(r => [r.name, r.phone, r.email, r.referredBy, r.notes].join(' ').toLowerCase().includes(q))
+        : allRows;
+
+      const tbody = $('rows');
+      tbody.replaceChildren();
+      for (const r of rows) {
+        const tr = document.createElement('tr');
+        tr.append(
+          cell(fmtDate(r.submitted), 'nowrap'),
+          cell(r.name),
+          linkCell(r.phone, 'tel:' + r.phone.replace(/[^\d+]/g, '')),
+          linkCell(r.email, 'mailto:' + r.email),
+          cell(r.referredBy),
+          cell(r.notes),
+        );
+        tbody.appendChild(tr);
+      }
+      $('empty').hidden = rows.length > 0;
+      $('empty').textContent = allRows.length ? 'No referrals match your search.' : 'No referrals yet.';
+      $('count').textContent = q
+        ? `${rows.length} of ${allRows.length} referrals`
+        : `${allRows.length} referral${allRows.length === 1 ? '' : 's'}`;
+    }
+
+    async function load(pw) {
+      const res = await callApi({ action: 'list', password: pw });
+      if (!res.ok) {
+        const err = new Error(res.error || 'Couldn\'t load referrals.');
+        err.unauthorized = !!res.unauthorized;
+        throw err;
+      }
+      allRows = res.rows || [];
+      setPw(pw);
+      $('login-view').hidden = true;
+      $('data-view').hidden = false;
+      $('data-msg').hidden = true;
+      render();
+    }
+
+    $('login-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const btn = $('login-btn');
+      btn.disabled = true;
+      btn.textContent = 'Checking…';
+      try {
+        await load($('password').value);
+        $('password').value = '';
+      } catch (err) {
+        showLogin(err.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'View referrals';
+      }
+    });
+
+    $('refresh').addEventListener('click', async () => {
+      const btn = $('refresh');
+      btn.disabled = true;
+      try {
+        await load(getPw());
+      } catch (err) {
+        if (err.unauthorized) { setPw(null); showLogin(err.message); }
+        else { $('data-msg').textContent = err.message; $('data-msg').hidden = false; }
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    $('logout').addEventListener('click', () => {
+      setPw(null);
+      allRows = [];
+      $('rows').replaceChildren();
+      showLogin();
+    });
+
+    $('search').addEventListener('input', render);
+
+    // Resume if already signed in during this tab session.
+    const saved = getPw();
+    if (saved) load(saved).catch(err => { setPw(null); showLogin(err.unauthorized ? null : err.message); });
+    else showLogin();
+  </script>
+</body>
+</html>
